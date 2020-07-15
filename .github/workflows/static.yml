@@ -1,0 +1,140 @@
+# This is a basic workflow to help you get started with Actions
+name: shadowsocks-libev
+
+# Controls when the action will run. Triggers the workflow on push or pull request
+# events but only for the master branch
+on:
+  #push:
+    #branches: [ master ]
+  #pull_request:
+    #branches: [ master ]
+  watch:
+    types: started
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  # This workflow contains a single job called "build"
+  build:
+    # The type of runner that the job will run on
+    runs-on: ubuntu-16.04
+
+    if: github.event.repository.owner.id == github.event.sender.id
+    
+    env:
+      URL: https://downloads.openwrt.org/snapshots/targets/bcm53xx/generic/openwrt-sdk-bcm53xx-generic_gcc-8.4.0_musl_eabi.Linux-x86_64.tar.xz
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+
+    - name: Install dependencies
+      run: |
+        sudo -E apt-get -qq update
+        sudo -E apt-get install --no-install-recommends gettext build-essential autoconf libtool automake unzip
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+    
+    - name: upx
+      run: |
+        latest_version=$(wget -qO- https://api.github.com/repos/upx/upx/releases/latest | grep 'tag_name' | cut -d\" -f4)
+        [ -z ${latest_version} ]&&exit 127
+        wget --quiet --continue --show-progress https://github.com/upx/upx/releases/download/$latest_version/upx-${latest_version:1}-amd64_linux.tar.xz
+        tar xvJf upx*-amd64_linux.tar.xz
+        sudo mv -f upx-*-amd64_linux/upx /usr/local/bin
+        rm -rf upx*
+        
+    - name: mbedtls
+      run: |
+        git clone https://github.com/ARMmbed/mbedtls
+        cd mbedtls
+        make no_test
+        make install DESTDIR=/tmp/tmp
+        make clean
+        cd ..
+        
+    - name: libsodium
+      run: |
+        git clone https://github.com/jedisct1/libsodium --branch stable
+        cd libsodium
+        ./autogen.sh
+        ./configure --prefix=/tmp/tmp
+        make
+        make install
+        make clean
+        cd ..
+    
+    - name: libev
+      run: |
+        latest_version="$(wget -qO- http://dist.schmorp.de/libev/|grep -oP 'libev\-[0-9]+\.[0-9]+\.tar\.gz' | head -n 1)"
+        [ -z ${latest_version} ]&&exit 127
+        wget --quiet --continue --show-progress http://dist.schmorp.de/libev/${latest_version}
+        tar -xzf ${latest_version}
+        rm -f ${latest_version}
+        cd ${latest_version/.tar.gz/}
+        chmod +x autogen.sh
+        ./autogen.sh
+        ./configure --prefix=/tmp/tmp
+        make
+        make install
+        make clean
+        cd ..
+    
+    - name: libcares
+      run: |
+        git clone https://github.com/c-ares/c-ares
+        cd c-ares
+        ./buildconf
+        ./configure --prefix=/tmp/tmp
+        make
+        make install
+        make clean
+        cd ..
+        
+    - name: libpcre
+      run: |
+        latest_version="$(wget -qO- https://ftp.pcre.org/pub/pcre/|grep -oP 'pcre[0-9]+\-[0-9]+\.[0-9]+\.zip' | tail -n 1)"
+        [ -z ${latest_version} ]&&exit 127
+        wget --quiet --continue --show-progress https://ftp.pcre.org/pub/pcre/${latest_version}
+        unzip ${latest_version}
+        rm -f ${latest_version}
+        cd ${latest_version/.zip/}
+        ./configure --prefix=/tmp/tmp
+        make
+        make install
+        make clean
+        cd ..
+        
+    - name: shadowsocks-libev
+      run: |
+        git clone https://github.com/shadowsocks/shadowsocks-libev.git
+        cd shadowsocks-libev
+        git submodule update --init --recursive
+        ./autogen.sh
+        ./configure \
+        --disable-ssp \
+        --disable-documentation \
+        --with-ev=/tmp/tmp \
+        --with-sodium=/tmp/tmp \
+        --with-cares=/tmp/tmp \
+        --with-pcre=/tmp/tmp \
+        --with-mbedtls=/tmp/tmp \
+        --prefix=/tmp/ss \
+        LDFLAGS="-Wl,-static -static -static-libgcc -L/usr/lib" \
+        CFLAGS="-I/usr/include" LIBS="-lpthread -lm"
+        #查找替换 链接第三方静态库
+        find ./ -name "Makefile" -type f -exec sed -i 's/-lev  -lcares -lsodium -lmbedcrypto -lpcre/-l:libev.a  -l:libcares.a -l:libsodium.a -l:libmbedcrypto.a -l:libpcre.a/g' {} +
+        find ./ -name "Makefile" -type f -exec sed -i 's/-lev -lsodium/-l:libev.a -l:libsodium.a/g' {} +
+        find ./ -name "Makefile" -type f -exec sed -i 's/-lcares/-l:libcares.a/g' {} +      
+        make     
+        find src/ ! -name 'ss-nat' -a -name 'ss-*' -type f | xargs strip
+        file src/ss-server
+        readelf -d src/ss-server
+        find src/ ! -name 'ss-nat' -a -name 'ss-*' -type f | xargs upx --best --ultra-brute -v
+        make install
+        make clean
+
+    - name: Upload artifact
+      if: success()
+      uses: actions/upload-artifact@master
+      with:
+        name: shadowsocks-libev
+        path: /tmp/ss/bin
